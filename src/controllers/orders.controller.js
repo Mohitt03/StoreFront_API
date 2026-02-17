@@ -2,79 +2,151 @@ const Order = require("../models/order.model");
 const Product = require("../models/product.model");
 const asyncHandler = require("../utils/asyncHandler");
 const ApiError = require("../utils/ApiError");
-
+const ApiResponse = require("../utils/ApiResponse")
+const mongoose = require("mongoose")
 /**
  * @desc    Create Order (Customer)
  * @route   POST /api/orders
  * @access  Customer
  */
-const mongoose = require("mongoose");
-const ApiResponse = require("../utils/ApiResponse");
 
 const createOrder = asyncHandler(async (req, res) => {
     const items = req.body;
-    console.log(items);
 
     if (!items || items.length === 0) {
         throw new ApiError(400, "All fields are required");
     }
 
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
+    try {
+        let totalAmount = 0;
+        const orderItems = [];
+        let shopkeeper_id;
 
-    let totalAmount = 0;
-    const orderItems = [];
-    let shopkeeper_id;
-    for (const orderItem of items) {
+        for (const orderItem of items) {
 
-        const product = await Product.findById(orderItem.product_id);
-        console.log(product);
-        shopkeeper_id = product.shopkeeper_id
+            const product = await Product.findById(orderItem.product_id).session(session);
 
-        if (!product) {
-            throw new ApiError(404, "Product not found");
+            if (!product) {
+                throw new ApiError(404, "Product not found");
+            }
+
+            shopkeeper_id = product.shopkeeper_id;
+
+            if (orderItem.quantity < 1) {
+                throw new ApiError(400, "Quantity must be at least 1");
+            }
+
+            if (product.stock < orderItem.quantity) {
+                throw new ApiError(400, `Insufficient stock for ${product.name}`);
+            }
+
+            // Deduct stock
+            product.stock -= orderItem.quantity;
+            await product.save({ session, validateBeforeSave: false });
+
+            totalAmount += product.price * orderItem.quantity;
+
+            orderItems.push({
+                product_id: product._id,
+                quantity: orderItem.quantity,
+                priceAtPurchase: product.price,
+            });
         }
 
-        if (orderItem.quantity < 1) {
-            throw new ApiError(400, "Quantity must be at least 1");
+        const order = await Order.create([{
+            customer_id: req.user._id,
+            shopkeeper_id,
+            items: orderItems,
+            totalAmount,
+        }], { session });
+
+        await session.commitTransaction();
+        session.endSession();
+
+        res.status(201).json(
+            new ApiResponse(201, { order: order[0] }, "Order created successfully")
+        );
+
+    } catch (error) {
+        if (session.inTransaction()) {
+            await session.abortTransaction();
         }
 
-        if (product.stock < orderItem.quantity) {
-            throw new ApiError(400, `Insufficient stock for ${product.name}`);
-        }
-
-
-
-
-
-        // Deduct stock safely
-        product.stock -= orderItem.quantity;
-        await product.save({ validateBeforeSave: false });
-
-        totalAmount += product.price * orderItem.quantity;
-
-        orderItems.push({
-            product_id: product._id,
-            quantity: orderItem.quantity,
-            priceAtPurchase: product.price,
-        });
+        session.endSession();
+        throw error;
     }
-    console.log(orderItems);
-
-    const order = await Order.create([{
-        customer_id: req.user._id,
-        shopkeeper_id: shopkeeper_id,
-        items: orderItems,
-        totalAmount,
-    }]);
-
-
-
-    res.status(201).json(
-        new ApiResponse(200, { order: order[0] }, "Order created successfully"));
-
-
-
 });
+
+
+
+
+// const createOrder = asyncHandler(async (req, res) => {
+//     const items = req.body;
+//     console.log(items);
+
+//     if (!items || items.length === 0) {
+//         throw new ApiError(400, "All fields are required");
+//     }
+
+
+
+//     let totalAmount = 0;
+//     const orderItems = [];
+//     let shopkeeper_id;
+//     for (const orderItem of items) {
+
+//         const product = await Product.findById(orderItem.product_id);
+//         console.log(product);
+//         shopkeeper_id = product.shopkeeper_id
+
+//         if (!product) {
+//             throw new ApiError(404, "Product not found");
+//         }
+
+//         if (orderItem.quantity < 1) {
+//             throw new ApiError(400, "Quantity must be at least 1");
+//         }
+
+//         if (product.stock < orderItem.quantity) {
+//             throw new ApiError(400, `Insufficient stock for ${product.name}`);
+//         }
+
+
+
+
+
+//         // Deduct stock safely
+//         product.stock -= orderItem.quantity;
+//         await product.save({ validateBeforeSave: false });
+
+//         totalAmount += product.price * orderItem.quantity;
+
+//         orderItems.push({
+//             product_id: product._id,
+//             quantity: orderItem.quantity,
+//             priceAtPurchase: product.price,
+//         });
+//     }
+//     console.log(orderItems);
+
+//     const order = await Order.create([{
+//         customer_id: req.user._id,
+//         shopkeeper_id: shopkeeper_id,
+//         items: orderItems,
+//         totalAmount,
+//     }]);
+
+
+
+//     res.status(201).json(
+//         new ApiResponse(200, { order: order[0] }, "Order created successfully"));
+
+
+
+// });
 
 
 
@@ -85,11 +157,11 @@ const createOrder = asyncHandler(async (req, res) => {
  */
 const getOrders = asyncHandler(async (req, res) => {
     let orders;
-    console.log("req.user", req.user)
     if (req.user.role === "CUSTOMER") {
-        console.log("CUSTOMER");
-
-        orders = await Order.find()
+        console.log("CUSTOMER", req.user._id);
+        //finding orders using customer ID
+        orders = await Order.find({ customer_id: req.user._id })
+        count = await Order.countDocuments()
             .populate("customer_id", "name email")
             .populate("shopkeeper_id", "name email")
             .populate("items.product_id", "name");
@@ -98,6 +170,7 @@ const getOrders = asyncHandler(async (req, res) => {
         console.log("SHOPKEEPER");
 
         orders = await Order.find({ shopkeeper: req.user._id })
+        count = await Order.countDocuments()
             .populate("customer_id", "name email")
             .populate("shopkeeper_id", "name email")
             .populate("items.product_id");
@@ -106,7 +179,7 @@ const getOrders = asyncHandler(async (req, res) => {
         throw new ApiError(403, "Unauthorized access");
     }
 
-    res.status(200).json(new ApiResponse(200, { orders }, "Fetch Succesfull"));
+    res.status(200).json(new ApiResponse(200, { count, orders }, "Fetch Succesfull"));
 });
 
 

@@ -44,7 +44,7 @@ const updateProductSchema = Joi.object({
 
 // Add Stock Validation
 const addStockSchema = Joi.object({
-  quantity: Joi.number()
+  stock: Joi.number()
     .integer()
     .min(1)
     .required()
