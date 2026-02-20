@@ -4,81 +4,82 @@ const asyncHandler = require("../utils/asyncHandler");
 const ApiError = require("../utils/ApiError");
 const ApiResponse = require("../utils/ApiResponse")
 const mongoose = require("mongoose")
+const Batch = require("../models/batch.model")
 /**
  * @desc    Create Order (Customer)
  * @route   POST /api/orders
  * @access  Customer
  */
 
-const createOrder = asyncHandler(async (req, res) => {
-    const items = req.body;
+// const createOrder = asyncHandler(async (req, res) => {
+//     const items = req.body;
 
-    if (!items || items.length === 0) {
-        throw new ApiError(400, "All fields are required");
-    }
+//     if (!items || items.length === 0) {
+//         throw new ApiError(400, "All fields are required");
+//     }
 
-    const session = await mongoose.startSession();
-    session.startTransaction();
+//     const session = await mongoose.startSession();
+//     session.startTransaction();
 
-    try {
-        let totalAmount = 0;
-        const orderItems = [];
-        let shopkeeper_id;
+//     try {
+//         let totalAmount = 0;
+//         const orderItems = [];
+//         let shopkeeper_id;
 
-        for (const orderItem of items) {
+//         for (const orderItem of items) {
 
-            const product = await Product.findById(orderItem.product_id).session(session);
+//             const product = await Product.findById(orderItem.product_id).session(session);
 
-            if (!product) {
-                throw new ApiError(404, "Product not found");
-            }
+//             if (!product) {
+//                 throw new ApiError(404, "Product not found");
+//             }
 
-            shopkeeper_id = product.shopkeeper_id;
+//             shopkeeper_id = product.shopkeeper_id;
 
-            if (orderItem.quantity < 1) {
-                throw new ApiError(400, "Quantity must be at least 1");
-            }
+//             if (orderItem.quantity < 1) {
+//                 throw new ApiError(400, "Quantity must be at least 1");
+//             }
 
-            if (product.stock < orderItem.quantity) {
-                throw new ApiError(400, `Insufficient stock for ${product.name}`);
-            }
+//             if (product.stock < orderItem.quantity) {
+//                 throw new ApiError(400, `Insufficient stock for ${product.name}`);
+//             }
 
-            // Deduct stock
-            product.stock -= orderItem.quantity;
-            await product.save({ session, validateBeforeSave: false });
+//             // Deduct stock
+//             product.stock -= orderItem.quantity;
+//             await product.save({ session, validateBeforeSave: false });
 
-            totalAmount += product.price * orderItem.quantity;
+//             totalAmount += product.price * orderItem.quantity;
 
-            orderItems.push({
-                product_id: product._id,
-                quantity: orderItem.quantity,
-                priceAtPurchase: product.price,
-            });
-        }
+//             orderItems.push({
+//                 product_id: product._id,
+//                 quantity: orderItem.quantity,
+//                 priceAtPurchase: product.price,
+//             });
+//         }
 
-        const order = await Order.create([{
-            customer_id: req.user._id,
-            shopkeeper_id,
-            items: orderItems,
-            totalAmount,
-        }], { session });
+//         const order = await Order.create([{
+//             customer_id: req.user._id,
+//             shopkeeper_id,
+//             items: orderItems,
+//             totalAmount,
+//         }], { session });
 
-        await session.commitTransaction();
-        session.endSession();
+//         await session.commitTransaction();
+//         session.endSession();
 
-        res.status(201).json(
-            new ApiResponse(201, { order: order[0] }, "Order created successfully")
-        );
+//         res.status(201).json(
+//             new ApiResponse(201, { order: order[0] }, "Order created successfully")
+//         );
 
-    } catch (error) {
-        if (session.inTransaction()) {
-            await session.abortTransaction();
-        }
+//     } catch (error) {
+//         if (session.inTransaction()) {
+//             await session.abortTransaction();
+//         }
 
-        session.endSession();
-        throw error;
-    }
-});
+//         session.endSession();
+//         throw error;
+//     }
+// });
 
 
 
@@ -147,6 +148,111 @@ const createOrder = asyncHandler(async (req, res) => {
 
 
 // });
+
+
+const createOrder = asyncHandler(async (req, res) => {
+    const items = req.body;
+
+    if (!items || items.length === 0) {
+        throw new ApiError(400, "Order items are required");
+    }
+
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        let totalAmount = 0;
+        const orderItems = [];
+        let shopkeeper_id;
+
+        for (const orderItem of items) {
+
+            const product = await Product.findById(orderItem.product_id).session(session);
+
+            if (!product) {
+                throw new ApiError(404, "Product not found");
+            }
+
+            shopkeeper_id = product.shopkeeper_id;
+
+            if (orderItem.quantity < 1) {
+                throw new ApiError(400, "Quantity must be at least 1");
+            }
+
+            // 🔥 Fetch batches sorted by nearest expiry
+            const batches = await Batch.find({
+                product: product._id,
+                quantity: { $gt: 0 },
+                expiryDate: { $gte: new Date() } // avoid expired
+            })
+                .sort({ expiryDate: 1 })
+                .session(session);
+
+            if (!batches.length) {
+                throw new ApiError(400, `No stock available for ${product.name}`);
+            }
+
+            let remainingQty = orderItem.quantity;
+            let deductedQty = 0;
+
+            for (const batch of batches) {
+
+                if (remainingQty <= 0) break;
+
+                if (batch.quantity >= remainingQty) {
+                    batch.quantity -= remainingQty;
+                    deductedQty += remainingQty;
+                    remainingQty = 0;
+                } else {
+                    deductedQty += batch.quantity;
+                    remainingQty -= batch.quantity;
+                    batch.quantity = 0;
+                }
+
+                await batch.save({ session, validateBeforeSave: false });
+            }
+
+            if (remainingQty > 0) {
+                throw new ApiError(400, `Insufficient stock for ${product.name}`);
+            }
+
+            // Update product total stock
+            product.stock -= deductedQty;
+            await product.save({ session, validateBeforeSave: false });
+
+            totalAmount += product.price * orderItem.quantity;
+
+            orderItems.push({
+                product_id: product._id,
+                quantity: orderItem.quantity,
+                priceAtPurchase: product.price,
+            });
+        }
+
+        const order = await Order.create([{
+            customer_id: req.user._id,
+            shopkeeper_id,
+            items: orderItems,
+            totalAmount,
+        }], { session });
+
+        await session.commitTransaction();
+        session.endSession();
+
+        res.status(201).json(
+            new ApiResponse(201, { order: order[0] }, "Order created successfully")
+        );
+
+    } catch (error) {
+
+        if (session.inTransaction()) {
+            await session.abortTransaction();
+        }
+
+        session.endSession();
+        throw error;
+    }
+});
 
 
 

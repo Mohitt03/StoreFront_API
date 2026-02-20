@@ -4,7 +4,7 @@ const mongoose = require("mongoose");
 const fs = require('fs')
 const app = express();
 const errorHandler = require('./middlewares/errorHandler.middleware')
-
+require("../src/cron/expiryCron")
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 
@@ -36,10 +36,12 @@ app.use((err, req, res, next) => {
 const AuthRoutes = require("./routes/auth.route")
 const ProductRoutes = require("./routes/products.route")
 const OrderRoutes = require("./routes/order.route")
+const BatchRoutes = require("./routes/batch.route")
 
 app.use('/auth', AuthRoutes);
 app.use('/api/orders', OrderRoutes);
 app.use('/api/products', ProductRoutes);
+app.use('/api/batch', BatchRoutes);
 
 //Error Handler
 app.use(errorHandler);
